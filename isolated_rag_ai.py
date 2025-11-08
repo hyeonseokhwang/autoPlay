@@ -72,6 +72,10 @@ CONFIG = {
     'obs_device_index': int(os.environ.get('HERO4_OBS_DEVICE_INDEX', '0'))
 }
 
+# 실시간 모니터링/피드백 설정
+CONFIG['live_frame'] = bool(int(os.environ.get('HERO4_LIVE_FRAME', '1')))
+CONFIG['feedback_file'] = os.environ.get('HERO4_FEEDBACK_FILE', 'feedback.json')
+
 class WindowTracker:
     """특정 윈도우만 '정확하게' 추적/고정하여 캡처/입력을 보장하는 트래커"""
 
@@ -934,6 +938,10 @@ class RAGEnhancedAI:
             self.snapshot_every = 1
         self.snapshot_root = os.path.join(CONFIG['snapshot_dir'], datetime.now().strftime('%Y%m%d_%H%M%S'))
         os.makedirs(self.snapshot_root, exist_ok=True)
+        # 라이브 프레임 경로(덮어쓰기)
+        self.live_latest_path = os.path.join(CONFIG['snapshot_dir'], 'latest.png')
+        self.live_meta_path = os.path.join(CONFIG['snapshot_dir'], 'latest.json')
+        self._pending_flag_bad = False
         
         print("🧠 RAG 강화 AI 시스템 초기화")
         print("💾 경험 데이터베이스 연결") 
@@ -1176,9 +1184,20 @@ RAG 경험을 참고하여 최적 행동 선택:
                         hwnd, rect, shot = self._grab_window_image()
                         if shot is not None:
                             self._save_step_snapshot(self.step_count, shot, screen_data, ai_decision)
+                            if CONFIG.get('live_frame', True):
+                                self._save_latest_frame(shot, screen_data, ai_decision)
                     except Exception as e:
                         # 스냅샷 실패는 무시하고 계속 진행
                         pass
+                else:
+                    # 매 스텝 라이브 프레임만 업데이트(가벼운 경로)
+                    if CONFIG.get('live_frame', True):
+                        try:
+                            hwnd, rect, shot = self._grab_window_image()
+                            if shot is not None:
+                                self._save_latest_frame(shot, screen_data, ai_decision)
+                        except Exception:
+                            pass
                 
                 # 계획형(휴리스틱) 의사결정: 메뉴/정지 상태 우선 적용
                 planner_action, planner_reason = self._planner_decision(screen_data)
@@ -1195,6 +1214,15 @@ RAG 경험을 참고하여 최적 행동 선택:
                         use_planner = True
                 
                 chosen_action = planner_action if use_planner else ai_decision['action']
+                # 외부 피드백 적용 (next_action/flag_bad)
+                fb = self._read_feedback()
+                if fb:
+                    if fb.get('flag_bad'):
+                        self._pending_flag_bad = True
+                        print("⚑ 인간 피드백: 현재 의사결정이 부적절로 플래그됨")
+                    if isinstance(fb.get('next_action'), str) and fb['next_action']:
+                        chosen_action = fb['next_action']
+                        print(f"📝 인간 개입: next_action -> {chosen_action}")
                 if use_planner:
                     print(f"🧭 플래너 적용: {planner_action} | {planner_reason}")
                 
@@ -1214,7 +1242,12 @@ RAG 경험을 참고하여 최적 행동 선택:
                         self.action_history.append(action_to_send)
                         
                         # 결과 평가 및 RAG 저장
+                        # 피드백 플래그 반영
+                        if self._pending_flag_bad:
+                            ai_decision = {**ai_decision, 'flagged': True}
                         experience_result = self._evaluate_result(screen_data, ai_decision)
+                        # 단발성 플래그 해제
+                        self._pending_flag_bad = False
                         self.rag_db.store_experience(screen_data, ai_decision, experience_result)
                         
                         # 진행 상황 출력 (간단히)
@@ -1238,6 +1271,59 @@ RAG 경험을 참고하여 최적 행동 선택:
             # 간단 요약
             elapsed = time.time() - self.session_start
             print(f"📈 총 스텝 {self.step_count-1}, 전투 감지 {self.battle_count}, 경과 {elapsed:.1f}s")
+
+    def _save_latest_frame(self, img: Image.Image, sd: Dict, decision: Dict):
+        """현재 프레임을 latest.png로 저장하고 간단 메타를 latest.json에 갱신"""
+        if img is None:
+            return
+        try:
+            # 손상 위험 줄이기 위해 임시 파일 후 교체
+            tmp_path = self.live_latest_path + ".tmp"
+            img.save(tmp_path)
+            try:
+                if os.path.exists(self.live_latest_path):
+                    os.replace(tmp_path, self.live_latest_path)
+                else:
+                    os.rename(tmp_path, self.live_latest_path)
+            except Exception:
+                # 교체 실패 시 직접 저장
+                img.save(self.live_latest_path)
+            meta = {
+                'ts': datetime.now().isoformat(),
+                'step': self.step_count,
+                'situation': decision.get('situation_type') if decision else None,
+                'action': decision.get('action') if decision else None,
+                'flagged': bool(decision.get('flagged')) if decision else False,
+                'brightness': sd.get('brightness') if sd else None,
+                'movement': sd.get('movement') if sd else None
+            }
+            with open(self.live_meta_path, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _read_feedback(self) -> Optional[Dict]:
+        """feedback.json 읽어 next_action / flag_bad 전달. 사용 후 파일 삭제."""
+        path = CONFIG.get('feedback_file') or 'feedback.json'
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # 소비 후 삭제(원샷)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            # 형식 간단 검증
+            if not isinstance(data, dict):
+                return None
+            return {
+                'next_action': data.get('next_action'),
+                'flag_bad': bool(data.get('flag_bad'))
+            }
+        except Exception:
+            return None
 
     def _maybe_unstuck(self, sig, action: str) -> Optional[str]:
         """같은 액션 반복 + 시그니처 변화 없으면 언스턱 액션 반환"""
@@ -1313,6 +1399,9 @@ RAG 경험을 참고하여 최적 행동 선택:
         
         if ai_decision.get('confidence', 0) > 0.8:
             reward += 0.2
+        # 인간 피드백 플래그 시 보상 낮춤
+        if ai_decision.get('flagged'):
+            reward = max(0.0, reward - 0.5)
         
         # 전투 감지 (간단한 방식)
         battle_found = 0
