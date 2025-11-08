@@ -6,7 +6,7 @@ DeepSeek 기반 두뇌 스텁
 """
 from __future__ import annotations
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from .brain_base import BrainBase
 
 try:
@@ -17,13 +17,29 @@ except ImportError:  # 로컬 환경에 아직 설치 안된 경우
 PROMPT_TEMPLATE = """You are a game automation policy generator.\nReturn ONLY valid JSON with key 'actions'.\nExample:\n{"actions":[{"type":"tap","key":"enter"}]}\nState:\n{state}\nJSON:"""
 
 class DeepSeekBrain(BrainBase):
-    def __init__(self, model_path: str = "models/llm/deepseek-r1-8b-q4_k_m.gguf", max_tokens: int = 128):
+    def __init__(
+        self,
+        model_path: str = "models/llm/deepseek-r1-8b-q4_k_m.gguf",
+        max_tokens: int = 128,
+        n_ctx: int = 8192,
+        n_gpu_layers: int = -1,
+        n_threads: Optional[int] = None,
+    ):
         self.model_path = model_path
         self.max_tokens = max_tokens
         self._model = None
         if llama_cpp:
             try:
-                self._model = llama_cpp.Llama(model_path=model_path, n_ctx=8192, logits_all=False)
+                llm_kwargs = {
+                    "model_path": model_path,
+                    "n_ctx": n_ctx,
+                    "logits_all": False,
+                    "n_gpu_layers": n_gpu_layers,
+                }
+                if n_threads is not None:
+                    llm_kwargs["n_threads"] = n_threads
+                self._model = llama_cpp.Llama(**llm_kwargs)
+                print(f"[DeepSeekBrain] 모델 로드 완료: {model_path} (n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers})")
             except Exception as e:
                 print(f"[DeepSeekBrain] 모델 로드 실패: {e}")
                 self._model = None
