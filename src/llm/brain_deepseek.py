@@ -6,7 +6,7 @@ DeepSeek 기반 두뇌 스텁
 """
 from __future__ import annotations
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from .brain_base import BrainBase
 
 try:
@@ -15,6 +15,15 @@ except ImportError:  # 로컬 환경에 아직 설치 안된 경우
     llama_cpp = None  # 타입 회피용
 
 PROMPT_TEMPLATE = """You are a game automation policy generator.\nReturn ONLY valid JSON with key 'actions'.\nExample:\n{"actions":[{"type":"tap","key":"enter"}]}\nState:\n{state}\nJSON:"""
+
+CHAT_TEMPLATE = (
+    "You are a helpful coach for The Legend of Heroes IV (DOSBox).\n"
+    "Always answer in Korean, concise and practical.\n"
+    "If a '컨텍스트' block was provided earlier as a system message, use it.\n"
+    "Conversation so far:\n{history}\n"
+    "User: {user}\n"
+    "Assistant:"
+)
 
 class DeepSeekBrain(BrainBase):
     def __init__(
@@ -75,3 +84,46 @@ class DeepSeekBrain(BrainBase):
                 {"type": "tap", "key": "enter"},
                 {"type": "key_hold", "key": "up", "ms": 120}
             ]}
+
+    # 자연어 챗 응답
+    def chat(self, messages: List[Dict[str, str]], system: Optional[str] = None, max_tokens: Optional[int] = None) -> str:
+        # messages: [{role: system|user|assistant, content: str}, ...]
+        # 최근 대화 요약 텍스트 구성
+        history_lines: List[str] = []
+        for m in messages[-20:]:
+            r = m.get("role", "").lower()
+            c = m.get("content", "")
+            if r == "user":
+                history_lines.append(f"User: {c}")
+            elif r == "assistant":
+                history_lines.append(f"Assistant: {c}")
+            # system은 히스토리에 직접 포함하지 않음(이미 별도 system으로 주입 가능)
+        last_user = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                last_user = m.get("content", "")
+                break
+
+        if not self._model:
+            # 더미 응답(간단 규칙 기반): 최근 사용자 질문을 요약, 히스토리 길이에 따라 코칭 포인트 제공
+            tips = []
+            if "전투" in last_user:
+                tips.append("전투 전 HP/MP 점검 후 버프 사용을 고려하세요")
+            if "이동" in last_user or "길" in last_user:
+                tips.append("불필요한 횡이동 줄이고 목적지까지 직선 루트 탐색")
+            if "자원" in last_user or "골드" in last_user:
+                tips.append("상점 방문 주기 최적화로 소모품 과잉 구매 피하기")
+            if not tips:
+                tips.append("상황을 조금 더 구체적으로 말하면 세부 전략을 줄 수 있어요")
+            joined = " • ".join(tips)
+            return f"요약: {last_user[:60]} | 코칭: {joined}"
+
+        prompt = CHAT_TEMPLATE.format(
+            history="\n".join(history_lines),
+            user=last_user,
+        )
+        if system:
+            prompt = system.strip() + "\n\n" + prompt
+        output = self._model(prompt=prompt, max_tokens=(max_tokens or self.max_tokens), temperature=0.4, stop=["\nUser:"])
+        text = output.get("choices", [{}])[0].get("text", "").strip()
+        return text

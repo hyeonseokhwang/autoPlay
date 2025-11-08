@@ -7,6 +7,13 @@ LLM 상담(훈수) 콘솔
 from __future__ import annotations
 import argparse
 import sys
+import os
+import sys
+# Ensure project root on sys.path when running as a script
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 from src.llm.brain_deepseek import DeepSeekBrain
 from src.memory.memory_store import MemoryStore
 from src.chat.chat_session import ChatSession
@@ -36,11 +43,12 @@ def main():
     parser.add_argument("--model", default="models/llm/deepseek-r1-8b-q4_k_m.gguf", help="GGUF 모델 경로")
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--session", default="coach")
+    parser.add_argument("--mode", choices=["actions", "chat"], default="chat", help="대화 모드 (chat=자연어, actions=JSON 정책)")
     args = parser.parse_args()
 
     brain = DeepSeekBrain(model_path=args.model, max_tokens=args.max_tokens)
     memory = MemoryStore()
-    chat = ChatSession(brain=brain, memory=memory, session_name=args.session)
+    chat = ChatSession(brain=brain, memory=memory, session_name=args.session, mode=args.mode)
     chat.system(SYSTEM_PROMPT)
 
     print("[챗 시작] 종료하려면 /exit 입력. 검색은 /s <쿼리>")
@@ -64,6 +72,9 @@ def main():
         ctx = build_context(memory, query_override or user_in)
         # 컨텍스트를 system으로 임시 주입
         chat.system("컨텍스트:\n" + ctx)
+        # 검증 편의를 위해 /s 사용 시 컨텍스트를 화면에도 출력
+        if query_override is not None:
+            print("\n[컨텍스트 미리보기]\n" + ctx + "\n")
         answer = chat.ask(user_in)
         print("답변>", answer)
 
