@@ -1,0 +1,107 @@
+# 모델 프로파일 예시 (하이엔드 데스크탑 기준)
+# 실제 운영 시 model_profiles.yaml 로 복사 후 수정
+
+profiles:
+  high_end:
+    description: "RTX4090 + 128GB RAM 최대 품질 실시간"
+    vision:
+      detector:
+        model: yolo_v8s
+        weight_path: models/yolo/yolov8s-ui.pt
+        backend: tensorrt_fp16   # torch_fp16 | tensorrt_fp16 | tensorrt_int8
+        input_size: 640
+        conf_threshold: 0.35
+        iou_threshold: 0.5
+      cursor:
+        mode: template           # template | detector
+        template_path: assets/cursor_template.png
+        match_threshold: 0.1
+      scene_classifier:
+        model: resnet18
+        weight_path: models/classifier/resnet18_scene.pt
+        backend: torch_fp16
+      ocr:
+        engine: paddleocr
+        lang: ko+en
+        use_angle_cls: true
+    llm:
+      policy:
+        model_family: deepseek
+        model_name: deepseek-r1-8b-q4_k_m.gguf
+        runtime: llama_cpp        # llama_cpp | ollama | vllm (향후)
+        context_tokens: 8192
+        max_output_tokens: 128
+        temperature: 0.4
+        top_p: 0.9
+        stop: ["</action>"]
+    memory:
+      recent_window: 50
+      compress_every: 200
+      long_term_store: data/memory_state.json
+    loop:
+      target_fps: 12
+      policy_interval_ms: 600      # 정책 재계산 주기(최소)
+      max_frame_queue: 2
+
+  balanced:
+    description: "중간급 GPU (예: RTX 3060/3070)"  
+    vision:
+      detector:
+        model: yolo_v8n
+        backend: torch_fp16
+        input_size: 512
+        conf_threshold: 0.4
+        iou_threshold: 0.5
+      cursor:
+        mode: template
+      scene_classifier:
+        model: resnet18
+        backend: torch_fp16
+      ocr:
+        engine: paddleocr
+        lang: ko+en
+    llm:
+      policy:
+        model_family: deepseek
+        model_name: deepseek-r1-3b-q4_k_m.gguf
+        runtime: llama_cpp
+        context_tokens: 4096
+        max_output_tokens: 96
+        temperature: 0.5
+    loop:
+      target_fps: 10
+      policy_interval_ms: 900
+
+  low_end:
+    description: "저사양 / CPU 위주"
+    vision:
+      detector:
+        model: disabled           # 비활성화 → 영역 기반 heuristic
+      cursor:
+        mode: template
+      scene_classifier:
+        model: disabled
+      ocr:
+        engine: disabled
+    llm:
+      policy:
+        model_family: deepseek
+        model_name: deepseek-r1-1.3b-q4_k_m.gguf
+        runtime: llama_cpp
+        context_tokens: 2048
+        max_output_tokens: 80
+        temperature: 0.6
+    loop:
+      target_fps: 6
+      policy_interval_ms: 1200
+
+# 공통 기본값 (profiles에서 누락 시 사용)
+defaults:
+  detector:
+    nms_max_detections: 50
+  ocr:
+    cache_enabled: true
+    max_ocr_per_second: 3
+  logging:
+    level: INFO
+    file: logs/runtime.log

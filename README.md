@@ -36,6 +36,12 @@ python screenshot.py --count 1 --open
 
 옵션 도움말은 `python screenshot.py -h` 참고.
 
+## 문서
+
+- 모델 선택 가이드: `docs/model_selection.md`
+- 아키텍처 & 로드맵: `docs/architecture.md`
+- 모델 프로파일 예시: `config/model_profiles.example.yaml`
+
 ## 주의
 
 - DOSBox 창이 꺼져 있거나 제목이 다르면 자동 재시도 후 종료합니다.
