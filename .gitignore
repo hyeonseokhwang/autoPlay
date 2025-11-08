@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# VSCode/IDE
+.vscode/
+.idea/
+
+# Data/Models/Artifacts
+snapshots/
+data/
+models/
+*.db
+*.pkl
+*.sqlite
+
+# OS/Cache
+.DS_Store
+Thumbs.db

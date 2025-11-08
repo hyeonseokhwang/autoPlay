@@ -1,0 +1,35 @@
+{
+  "screen_capture": {
+    "window_title": "DOSBox",
+    "capture_fps": 10,
+    "screenshot_path": "temp/screenshots/"
+  },
+  "game_settings": {
+    "game_resolution": [640, 480],
+    "ui_elements": {
+      "character_area": [50, 50, 150, 150],
+      "minimap_area": [500, 50, 600, 150],
+      "status_bar": [0, 450, 640, 480]
+    }
+  },
+  "ai_settings": {
+    "decision_delay": 0.5,
+    "exploration_priority": 0.7,
+    "combat_priority": 0.9,
+    "safe_mode": true
+  },
+  "input_settings": {
+    "key_delay": 0.1,
+    "movement_keys": {
+      "up": "up",
+      "down": "down", 
+      "left": "left",
+      "right": "right"
+    },
+    "action_keys": {
+      "confirm": "enter",
+      "cancel": "esc",
+      "menu": "space"
+    }
+  }
+}
