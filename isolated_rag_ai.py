@@ -425,6 +425,18 @@ class RAGDatabase:
                 )
             """)
             
+            # 인간-LLM 대화 가이드 저장
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS human_guidance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    situation_type TEXT,
+                    screen_step INTEGER,
+                    user_message TEXT,
+                    model_response TEXT
+                )
+            """)
+            
     def store_experience(self, screen_data: Dict, ai_decision: Dict, result: Dict):
         """경험 저장 (비동기 큐 방식)"""
         try:
@@ -499,6 +511,19 @@ class RAGDatabase:
                             self._batch_update_reasoning_pattern(
                                 conn, data['ai_decision'], data['result']
                             )
+                        elif data['type'] == 'human_chat':
+                            # 인간-LLM 대화 저장
+                            conn.execute("""
+                                INSERT INTO human_guidance
+                                (timestamp, situation_type, screen_step, user_message, model_response)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (
+                                data.get('timestamp'),
+                                data.get('situation_type'),
+                                data.get('screen_step'),
+                                data.get('user_message'),
+                                data.get('model_response')
+                            ))
                     
                     conn.commit()
                     
@@ -638,6 +663,9 @@ class RAGDatabase:
         # 상황별 최적 행동 가져오기
         best_actions = self.get_best_actions_for_situation(situation)
         
+        # 최근 인간 가이드 가져오기
+        human_notes = self.get_recent_human_guidance(situation, 3)
+        
         # RAG 컨텍스트 구성
         context = "과거 경험 참조:\n"
         
@@ -651,7 +679,71 @@ class RAGDatabase:
             for action in best_actions:
                 context += f"- {action['action']}: 성공률 {action['success_rate']:.1%} (사용 {action['usage_count']}회)\n"
         
+        if human_notes:
+            context += "\n최근 인간 가이드:\n"
+            for note in human_notes:
+                ts = note.get('timestamp', '')
+                msg = (note.get('user_message') or '')[:120]
+                res = (note.get('model_response') or '')[:120]
+                context += f"- [{ts}] 사용자: {msg} | 모델: {res}\n"
+        
         return context
+
+    def store_human_chat(self, user_message: str, model_response: str, situation_type: Optional[str] = None, screen_step: Optional[int] = None):
+        """인간-LLM 대화(가이드)를 저장 (비동기 큐)"""
+        try:
+            data = {
+                'type': 'human_chat',
+                'timestamp': datetime.now().isoformat(),
+                'situation_type': situation_type or 'general',
+                'screen_step': int(screen_step) if screen_step is not None else None,
+                'user_message': user_message,
+                'model_response': model_response,
+            }
+            self.write_queue.put(data)
+        except Exception as e:
+            print(f"⚠️ 인간 가이드 큐잉 실패: {e}")
+
+    def get_recent_human_guidance(self, situation_type: Optional[str] = None, limit: int = 3) -> List[Dict]:
+        """최근 인간 가이드 로그 조회"""
+        with self.db_lock:
+            try:
+                with self._get_connection() as conn:
+                    if situation_type:
+                        cur = conn.execute(
+                            """
+                            SELECT timestamp, situation_type, screen_step, user_message, model_response
+                            FROM human_guidance
+                            WHERE situation_type = ? OR situation_type = 'general' OR situation_type IS NULL
+                            ORDER BY id DESC
+                            LIMIT ?
+                            """,
+                            (situation_type, limit)
+                        )
+                    else:
+                        cur = conn.execute(
+                            """
+                            SELECT timestamp, situation_type, screen_step, user_message, model_response
+                            FROM human_guidance
+                            ORDER BY id DESC
+                            LIMIT ?
+                            """,
+                            (limit,)
+                        )
+                    rows = cur.fetchall()
+                    out = []
+                    for r in rows:
+                        out.append({
+                            'timestamp': r[0],
+                            'situation_type': r[1],
+                            'screen_step': r[2],
+                            'user_message': r[3],
+                            'model_response': r[4],
+                        })
+                    return out
+            except Exception as e:
+                print(f"⚠️ 인간 가이드 조회 실패: {e}")
+                return []
 
 class IsolatedGameController:
     """격리된 게임 컨트롤러"""

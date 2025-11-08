@@ -28,6 +28,13 @@ import sys
 import json
 import asyncio
 import aiohttp
+from typing import Optional
+
+try:
+    # Reuse RAG DB from main AI to store chats
+    from isolated_rag_ai import RAGDatabase
+except Exception:
+    RAGDatabase = None
 from datetime import datetime
 
 SNAP_DIR = os.environ.get('HERO4_SNAPSHOT_DIR', 'snapshots')
@@ -113,6 +120,12 @@ def print_summary():
 
 async def main():
     os.makedirs(SNAP_DIR, exist_ok=True)
+    db = None
+    if RAGDatabase is not None:
+        try:
+            db = RAGDatabase()
+        except Exception:
+            db = None
     print("🗣️ 인간-상호작용 콘솔 (타이핑 후 Enter) — /help 로 명령 보기")
     print_summary()
     while True:
@@ -167,6 +180,15 @@ async def main():
                 print("\n=== LLM ===")
                 print(resp.strip())
                 print("=== END ===\n")
+                # Save to RAG DB as human guidance
+                if db is not None:
+                    meta = load_latest_meta() or {}
+                    situation = meta.get('situation') or 'general'
+                    step = meta.get('step')
+                    try:
+                        db.store_human_chat(user_message=msg, model_response=resp, situation_type=situation, screen_step=step)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"[error] chat: {e}")
             continue
@@ -178,6 +200,14 @@ async def main():
             print("\n=== LLM ===")
             print(resp.strip())
             print("=== END ===\n")
+            if db is not None:
+                meta = load_latest_meta() or {}
+                situation = meta.get('situation') or 'general'
+                step = meta.get('step')
+                try:
+                    db.store_human_chat(user_message=line, model_response=resp, situation_type=situation, screen_step=step)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[error] chat: {e}")
 
