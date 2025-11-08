@@ -33,4 +33,14 @@ class ScreenRecognizer:
         d = os.path.dirname(path)
         if d and not os.path.exists(d):
             os.makedirs(d, exist_ok=True)
-        img.save(path)
+        try:
+            # 이미지가 비정상 크기면 예외 발생할 수 있어 안전한 복사본 사용
+            safe = img.copy()
+            safe.save(path)
+        except Exception as e:
+            # PNG 저장 실패 시 JPEG로 재시도
+            try:
+                alt = path.replace('.png', '_fallback.jpg')
+                img.convert('RGB').save(alt, quality=90)
+            except Exception:
+                pass

@@ -59,6 +59,8 @@ CONFIG = {
     'snapshot_dir': os.environ.get('HERO4_SNAPSHOT_DIR', 'snapshots'),
     'snapshot_every_steps': int(os.environ.get('HERO4_SNAPSHOT_EVERY', '1')),
     'snapshot_annotate': bool(int(os.environ.get('HERO4_SNAPSHOT_ANNOT', '1'))),
+    # 최대 스텝(테스트/데모용). 0 또는 미설정 시 무제한.
+    'max_steps': int(os.environ.get('HERO4_MAX_STEPS', '0')),
     # 타깃 창 추적 필터
     'win_title_substr': os.environ.get('HERO4_WIN_TITLE', 'dosbox'),  # 예: 'DOSBox', 'ED4'
     'win_class': os.environ.get('HERO4_WIN_CLASS', ''),               # 예: 'SDL_app' 등
@@ -938,6 +940,12 @@ class RAGEnhancedAI:
         print("🔒 완전 격리된 컨트롤러 준비")
         print("📊 학습 통계 시스템 활성화")
         print(f"🎯 목표: {self.goal} (초기 단계: {self.goal_phase})")
+        # 행동 정책(성공률 기반) 초기화
+        try:
+            from src.action_policy import ActionPolicy
+            self.action_policy = ActionPolicy(db_path="hero4_rag.db")
+        except Exception:
+            self.action_policy = None
     
     async def rag_enhanced_thinking(self, screen_data: Dict) -> Dict:
         """RAG 강화 사고 과정"""
@@ -1014,6 +1022,15 @@ RAG 경험을 참고하여 최적 행동 선택:
         # 실패시 RAG + 목표 바이어스 기반 기본 응답
         best_actions = self.rag_db.get_best_actions_for_situation(situation_type)
         fallback_action = best_actions[0]['action'] if best_actions else 'right'
+        # 정책 기반 가중치 선택(있으면 우선)
+        if getattr(self, 'action_policy', None):
+            candidates = ['left','right','up','down','space','enter','z','x','a','s','1','2','esc']
+            try:
+                chosen = self.action_policy.choose_action(situation_type, candidates)
+                if chosen:
+                    fallback_action = chosen
+            except Exception:
+                pass
         
         # 메뉴에서는 탈출/선택 우선
         if situation_type == 'menu_ui':
@@ -1115,6 +1132,14 @@ RAG 경험을 참고하여 최적 행동 선택:
         try:
             while True:
                 self.step_count += 1
+                # 최대 스텝 도달 시 종료
+                try:
+                    max_steps = int(CONFIG.get('max_steps') or 0)
+                except Exception:
+                    max_steps = 0
+                if max_steps > 0 and self.step_count > max_steps:
+                    print(f"⏱️ 최대 스텝({max_steps}) 도달. 세션 종료")
+                    break
                 
                 # 화면 캡처 및 분석 (고속)
                 screen_data = self._capture_and_analyze()
@@ -1210,6 +1235,9 @@ RAG 경험을 참고하여 최적 행동 선택:
         finally:
             self.controller.stop_isolated_control()
             print("🔒 격리된 컨트롤러 중지")
+            # 간단 요약
+            elapsed = time.time() - self.session_start
+            print(f"📈 총 스텝 {self.step_count-1}, 전투 감지 {self.battle_count}, 경과 {elapsed:.1f}s")
 
     def _maybe_unstuck(self, sig, action: str) -> Optional[str]:
         """같은 액션 반복 + 시그니처 변화 없으면 언스턱 액션 반환"""

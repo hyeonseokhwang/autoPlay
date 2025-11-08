@@ -62,8 +62,14 @@ class StateClassifier:
             raise RuntimeError("PyTorch 가 필요합니다 (requirements.txt 내 torch)")
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = _StateCNN(num_classes=len(CLASS_NAMES)).to(self.device)
+        self.model_path = model_path
+        self._last_mtime: Optional[float] = None
         if model_path and os.path.exists(model_path):
             self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            try:
+                self._last_mtime = os.path.getmtime(model_path)
+            except Exception:
+                self._last_mtime = None
         self.model.eval()
         self.size = (160, 120)
     @staticmethod
@@ -76,6 +82,24 @@ class StateClassifier:
         path = os.environ.get("HERO4_STATE_MODEL", os.path.join("models", "state_cnn.pt"))
         # 가중치가 없어도 로드 가능(무작위 초기화) → 신뢰도 낮음, 훈련 전까지는 휴리스틱 참고용
         return StateClassifier(model_path=path)
+    def maybe_reload(self) -> bool:
+        """모델 파일 변경 시 핫-리로드. 성공 시 True 반환."""
+        if not self.model_path:
+            return False
+        try:
+            mtime = os.path.getmtime(self.model_path)
+        except Exception:
+            return False
+        if self._last_mtime is None or mtime > self._last_mtime:
+            try:
+                state = torch.load(self.model_path, map_location=self.device)
+                self.model.load_state_dict(state)
+                self.model.eval()
+                self._last_mtime = mtime
+                return True
+            except Exception:
+                return False
+        return False
     def _preprocess(self, img: Image.Image) -> "torch.Tensor":
         # PIL RGB -> 160x120 -> Tensor(C,H,W), [0,1]
         if img.mode != 'RGB':

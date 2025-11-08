@@ -155,7 +155,10 @@ class GameWindowLocator:
             return None
         l, t, r, b = win32gui.GetClientRect(child)
         x, y = win32gui.ClientToScreen(child, (0, 0))
-        return (x, y, x + (r-l), y + (b-t))
+        w, h = (r - l), (b - t)
+        if w <= 0 or h <= 0:
+            return None
+        return (x, y, x + w, y + h)
 
     def window_bbox(self) -> Optional[Tuple[int,int,int,int]]:
         if not win32gui:
@@ -163,7 +166,11 @@ class GameWindowLocator:
         main, _ = self.get_handles()
         if not main:
             return None
-        return win32gui.GetWindowRect(main)
+        l, t, r, b = win32gui.GetWindowRect(main)
+        w, h = (r - l), (b - t)
+        if w <= 0 or h <= 0:
+            return None
+        return (l, t, r, b)
 
 class CaptureBackend:
     def capture(self) -> CaptureResult:
@@ -175,6 +182,9 @@ class GDIClientBackend(CaptureBackend):
     def capture(self) -> CaptureResult:
         bbox = self.locator.client_bbox()
         if not bbox:
+            return CaptureResult(None, None, {'mode': 'client'})
+        x1, y1, x2, y2 = bbox
+        if (x2 - x1) <= 0 or (y2 - y1) <= 0:
             return CaptureResult(None, None, {'mode': 'client'})
         try:
             img = ImageGrab.grab(bbox)
@@ -249,11 +259,23 @@ class WindowRectBackend(CaptureBackend):
         bbox = self.locator.window_bbox()
         if not bbox:
             return CaptureResult(None, None, {'mode': 'window'})
+        x1, y1, x2, y2 = bbox
+        if (x2 - x1) <= 0 or (y2 - y1) <= 0:
+            return CaptureResult(None, None, {'mode': 'window'})
         try:
             img = ImageGrab.grab(bbox)
             return CaptureResult(img, bbox, {'mode': 'window'})
         except Exception:
             return CaptureResult(None, None, {'mode': 'window', 'error': 'grab-failed'})
+class FullscreenBackend(CaptureBackend):
+    """윈도우가 없을 때 전체 화면 캡처 폴백."""
+    def capture(self) -> CaptureResult:
+        try:
+            img = ImageGrab.grab()
+            # bbox는 알 수 없으므로 None
+            return CaptureResult(img, None, {'mode': 'fullscreen'})
+        except Exception:
+            return CaptureResult(None, None, {'mode': 'fullscreen', 'error': 'grab-failed'})
 
 class MSSWindowBackend(CaptureBackend):
     def __init__(self, locator: GameWindowLocator):
@@ -454,6 +476,7 @@ class GameCapture:
             order.append(MSSWindowBackend(self.locator))
             order.append(WGCCaptureBackend(self.locator))
             order.append(WGCPureNativeBackend(self.locator))
+            order.append(FullscreenBackend())
         return order
     def get_frame(self) -> CaptureResult:
         last_meta: Dict = {'mode': self.mode, 'error': 'all-backends-failed'}
