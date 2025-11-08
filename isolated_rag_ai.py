@@ -75,6 +75,8 @@ CONFIG = {
 # 실시간 모니터링/피드백 설정
 CONFIG['live_frame'] = bool(int(os.environ.get('HERO4_LIVE_FRAME', '1')))
 CONFIG['feedback_file'] = os.environ.get('HERO4_FEEDBACK_FILE', 'feedback.json')
+CONFIG['llm_interval'] = int(os.environ.get('HERO4_LLM_INTERVAL', '5'))  # n 스텝마다 LLM 호출 (0=항상, 음수=비활성)
+CONFIG['llm_events'] = os.environ.get('HERO4_LLM_EVENTS', 'phase_change,battle_detect').split(',')  # 이벤트 기반 트리거
 
 class WindowTracker:
     """특정 윈도우만 '정확하게' 추적/고정하여 캡처/입력을 보장하는 트래커"""
@@ -954,13 +956,17 @@ class RAGEnhancedAI:
             self.action_policy = ActionPolicy(db_path="hero4_rag.db")
         except Exception:
             self.action_policy = None
+        # LLM 세션 재활용 관련 상태
+        self._llm_session = None
+        self._last_llm_step = -10_000
+        self._llm_query_index = 0
+        self._llm_events = [e.strip() for e in (CONFIG.get('llm_events') or []) if e.strip()]
     
     async def rag_enhanced_thinking(self, screen_data: Dict) -> Dict:
         """RAG 강화 사고 과정"""
-        
         # 1. 상황 분류
         situation_type = self._classify_situation(screen_data)
-        
+
         # 목표 컨텍스트 텍스트 구성
         goal_text = ""
         if self.goal == 'move_field_and_battle':
@@ -970,11 +976,11 @@ class RAGEnhancedAI:
             goal_text = "목표: 전투 화면 진입 및 유지\n"
         elif self.goal == 'explore':
             goal_text = "목표: 맵 탐험 및 UI/경로 학습\n"
-        
+
         # 2. RAG 컨텍스트 생성
         rag_context = self.rag_db.get_rag_context(screen_data, situation_type)
-        
-        # 3. AI에게 보낼 강화된 프롬프트
+
+        # 3. AI에게 보낼 강화된 프롬프트 (LLM 호출 시에만 사용)
         prompt = f"""영웅전설4 AI. 스텝 {self.step_count}, 전투 {self.battle_count}회.
 
 화면: {screen_data.get('description', '')[:200]}
@@ -993,39 +999,19 @@ RAG 경험을 참고하여 최적 행동 선택:
     "situation_type": "{situation_type}"
 }}"""
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "model": self.model_name,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.2,
-                        "max_tokens": 150,
-                        "num_ctx": 2048
-                    }
-                }
-                
-                async with session.post(f"{self.ollama_url}/api/generate", 
-                                      json=payload) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        ai_response = result.get('response', '')
-                        
-                        # JSON 파싱
-                        try:
-                            json_start = ai_response.find('{')
-                            json_end = ai_response.rfind('}') + 1
-                            
-                            if json_start >= 0 and json_end > json_start:
-                                json_str = ai_response[json_start:json_end]
-                                ai_decision = json.loads(json_str)
-                                ai_decision['situation_type'] = situation_type
-                                return ai_decision
-                        except:
-                            pass
-        except Exception as e:
-            print(f"❌ AI 연결 오류: {e}")
+        # LLM 호출 여부 결정 (간격 + 이벤트)
+        if self._should_llm_call(situation_type, screen_data):
+            self._last_llm_step = self.step_count
+            self._llm_query_index += 1
+            ai_decision = await self._invoke_llm(prompt, situation_type)
+            if ai_decision:
+                try:
+                    hwnd, rect, shot = self._grab_window_image()
+                    if shot is not None:
+                        self._save_llm_snapshot(self._llm_query_index, shot, screen_data, ai_decision)
+                except Exception:
+                    pass
+                return ai_decision
         
         # 실패시 RAG + 목표 바이어스 기반 기본 응답
         best_actions = self.rag_db.get_best_actions_for_situation(situation_type)
@@ -1090,6 +1076,80 @@ RAG 경험을 참고하여 최적 행동 선택:
             "confidence": 0.6,
             "situation_type": situation_type
         }
+
+    def _should_llm_call(self, situation_type: str, screen_data: Dict) -> bool:
+        """LLM 호출 여부 판단: 주기 + 이벤트 트리거"""
+        interval = CONFIG.get('llm_interval', 0)
+        try:
+            interval = int(interval)
+        except Exception:
+            interval = 0
+        if interval < 0:
+            return False  # 완전 비활성
+        triggered = False
+        # 이벤트: 전투 화면 감지
+        if 'battle_detect' in self._llm_events and situation_type == 'battle_scene':
+            triggered = True
+        # 이벤트: 단계(phase) 변경 직후 (map_changed 첫 감지 시)
+        if 'phase_change' in self._llm_events and self.map_changed and (self.step_count - self._last_llm_step) > 1:
+            # 필드 변경 후 아직 LLM 안 불렀다면 트리거
+            triggered = True
+        # 간격 기반
+        if interval == 0:
+            return True  # 항상 호출
+        if (self.step_count - self._last_llm_step) >= interval:
+            triggered = True
+        return triggered
+
+    async def _invoke_llm(self, prompt: str, situation_type: str) -> Optional[Dict]:
+        """실제 LLM 호출 (세션 재활용)"""
+        try:
+            if self._llm_session is None:
+                self._llm_session = aiohttp.ClientSession()
+            payload = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.2, "max_tokens": 150, "num_ctx": 2048}
+            }
+            async with self._llm_session.post(f"{self.ollama_url}/api/generate", json=payload) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                raw = data.get('response', '')
+                js_start = raw.find('{')
+                js_end = raw.rfind('}') + 1
+                if js_start >= 0 and js_end > js_start:
+                    try:
+                        obj = json.loads(raw[js_start:js_end])
+                        if isinstance(obj, dict):
+                            obj['situation_type'] = situation_type
+                            return obj
+                    except Exception:
+                        return None
+        except Exception as e:
+            print(f"❌ AI 연결 오류: {e}")
+        return None
+
+    def _save_llm_snapshot(self, idx: int, shot: Image.Image, sd: Dict, decision: Dict):
+        """LLM 호출 시점 스냅샷 저장 (llm_####.png/.json)"""
+        try:
+            base = os.path.join(self.snapshot_root, f"llm_{idx:04d}")
+            shot.save(base + ".png")
+            meta = {
+                'llm_index': idx,
+                'step': self.step_count,
+                'situation': decision.get('situation_type'),
+                'action': decision.get('action'),
+                'confidence': decision.get('confidence'),
+                'brightness': sd.get('brightness'),
+                'movement': sd.get('movement'),
+                'reason': (decision.get('thoughts') or decision.get('reason'))
+            }
+            with open(base + ".json", 'w', encoding='utf-8') as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
     
     def _classify_situation(self, screen_data: Dict) -> str:
         """상황 분류"""
@@ -1271,6 +1331,12 @@ RAG 경험을 참고하여 최적 행동 선택:
             # 간단 요약
             elapsed = time.time() - self.session_start
             print(f"📈 총 스텝 {self.step_count-1}, 전투 감지 {self.battle_count}, 경과 {elapsed:.1f}s")
+            # LLM 세션 종료
+            if self._llm_session:
+                try:
+                    await self._llm_session.close()
+                except Exception:
+                    pass
 
     def _save_latest_frame(self, img: Image.Image, sd: Dict, decision: Dict):
         """현재 프레임을 latest.png로 저장하고 간단 메타를 latest.json에 갱신"""
